@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\Log;
 use Gemini\Laravel\Facades\Gemini;
 use Gemini\Resources\Content;
 use Gemini\Enums\Role;
+use Google\Cloud\Core\ExponentialBackoff;
 
 class GeminiController extends Controller
 {
@@ -21,57 +22,53 @@ class GeminiController extends Controller
     public function chat(Request $request): JsonResponse
     {
         try {
-            $message = $request->input('message');
-            Log::info('Received chat request', ['message' => $message]);
-
-            // Get the existing history from the session
-            $history = Session::get('gemini_history', []);
-
-            // Initialize the chat history array for Gemini
-            $chatHistory = [];
-
-            // Convert session history to Gemini format
-            if (!empty($history)) {
-                // Log the history for debugging
-                Log::info('Existing chat history', ['history' => $history]);
-
-                // We'll skip history conversion for now since it might be causing issues
+            // Validate the incoming request
+            $validated = $request->validate([
+                'message' => 'required|string',
+            ]);
+            
+            // Get the message from the request
+            $message = $validated['message'];
+            
+            // Initialize Gemini client using environment variables
+            $apiKey = env('GEMINI_API_KEY');
+            
+            if (!$apiKey) {
+                Log::error('Gemini API key not found');
+                return response()->json(['error' => 'API key configuration missing'], 500);
             }
-
-            // Use the same approach as in the working testApi() method
-            try {
-                // Use the generativeModel approach that works in testApi
-                $result = Gemini::generativeModel('gemini-2.0-flash')->generateContent($message);
-                $aiResponse = $result->text();
-
-                Log::info('Received Gemini response', ['response' => $aiResponse]);
-
-                // Update the history in the session
-                $history[] = ['role' => 'user', 'parts' => [['text' => $message]]];
-                $history[] = ['role' => 'model', 'parts' => [['text' => $aiResponse]]];
-                Session::put('gemini_history', $history);
-
-                return response()->json(['response' => $aiResponse]);
-            } catch (\Exception $apiError) {
-                Log::error('API Communication Error', [
-                    'message' => $apiError->getMessage(),
-                    'code' => $apiError->getCode(),
-                    'trace' => $apiError->getTraceAsString()
-                ]);
-
-                return response()->json([
-                    'error' => 'Error communicating with Gemini API: ' . $apiError->getMessage()
-                ], 500);
-            }
+            
+            // Log request information for debugging
+            Log::info('Sending request to Gemini API', ['message' => $message]);
+            
+            // Make the request to Gemini API
+            $client = new \GuzzleHttp\Client();
+            $response = $client->post('https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key=' . $apiKey, [
+                'json' => [
+                    'contents' => [
+                        'parts' => [
+                            ['text' => $message]
+                        ]
+                    ]
+                ]
+            ]);
+            
+            // Parse and return the response
+            $responseBody = json_decode($response->getBody(), true);
+            Log::info('Received response from Gemini API', ['response' => $responseBody]);
+            
+            return response()->json([
+                'response' => $responseBody['candidates'][0]['content']['parts'][0]['text'] ?? 'No response from AI'
+            ]);
         } catch (\Exception $e) {
-            Log::error('General Gemini Error', [
+            // Log the error for debugging
+            Log::error('Error in Gemini chat endpoint', [
                 'message' => $e->getMessage(),
                 'trace' => $e->getTraceAsString()
             ]);
-
-            return response()->json([
-                'error' => 'Server error: ' . $e->getMessage()
-            ], 500);
+            
+            // Return a user-friendly error
+            return response()->json(['error' => 'An error occurred processing your request'], 500);
         }
     }
 
